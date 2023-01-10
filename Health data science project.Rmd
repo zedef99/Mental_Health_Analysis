@@ -1,0 +1,1356 @@
+---
+title: "Mental health analysis"
+author: "Federico Stragliotto, Elena Palmieri, Jia Shi"
+date: "22-12-2022"
+output: 
+  html_document:
+        toc: TRUE
+        number_sections: TRUE
+        theme: united
+        highlight: tango
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r include=FALSE, warning=FALSE}
+library(cowplot)
+library(DataExplorer)
+library(fpp3)
+library(kableExtra)
+library(skimr)
+library(questionr)
+library(data.table)
+library(gridExtra)
+library(jtools)
+library(caret)
+library(plot3D)
+library(sf)
+library(equatiomatic)
+library(giscoR)
+library(RColorBrewer)
+library(tidyverse)
+library(glmmTMB)
+library(ordinal)
+library(ggplot2)
+```
+
+# Introduction
+
+We've decided to tackle the issue of mental health because of its relevance in our daily life. The importance of the issue  had been also stated from the World Health Organization with its inclusion in the Sustainable Development Goals. The World mental health report 2022 made by the WHO discovered that especially during the first year of pandemic the rate of people with mental disorders have increased by going up  by 25%, added to the already one billion people suffering with them.
+
+In addition to that, mental health is strongly linked to suicide rates that account for more than one in every 100 deaths and it's a major cause of death among young people.
+Looking also at the economic consequences in the society we consider productivity losses, depressive and anxiety disorders that contribute majorly to national costs. (https://www.who.int/publications/i/item/9789240049338)
+
+**Our goal**
+
+Finding possible explicative relationships between mental health and specific lifestyle habits (smoking, drinking) and conditions.
+
+**Variable Dictionary** 
+
+*s01_salute_psic:* variable indicating the number of days on which the respondent experienced mental issue in the last 30 days
+
+*s01_salute_fis*: variable indicating the number of days on which the respondent had physical issue in the last 30 days
+s01_abit_attiv: variable indicating the number of days on which the respondent was unable to do the usual activities in the last 30 days
+
+*s03_fumo_att*: variable indicating if the interviewed is a smoker or not
+
+*s03_fumo_quanto*: variable indicating the number of cigarettes per day
+
+*s05_alcool_gg*: variable indicating the number of days on which the interviewed drank alcohol in the last 30 day
+
+*s07_eta*: variable indicating the age of the interviewed
+
+*s12_giu_morale_gg*: variable indicating the number of days on which the respondent felt sad in the last 30 days
+
+*diffeconomiche2cat*: variable indicating whether the respondent has economic problem or not
+
+*lavoro2cat*: variable indicating whether a respondent works continuously or not
+
+*regione*: variable indicating the Italian region (Lombardia not present)
+
+*sesso*: variable indicating the gender of the interviewed
+
+
+# Pre-Processing and EDA
+
+```{r echo = T, results = 'hide'}
+df_original<-read.csv("passi_19_cleaned.csv", header = T)
+df<-df_original
+names(df)
+```
+
+**Select only column of interest based on the questionnaire questions**
+
+```{r}
+df<-df%>%select(s01_salute_psic,s01_salute_fis, s01_abit_attiv, s03_fumo_att,s03_fumo_quanto, s05_alcool_gg, s07_eta, s12_giu_morale_gg,lavoro2cat,diffeconomiche2cat, sesso, regione)
+```
+
+```{r}
+str(df)
+```
+
+```{r}
+skim(df)
+```
+
+
+```{r include=FALSE}
+cat_var<-c("s03_fumo_att", "sesso", "regione", "diffeconomiche2cat", "lavoro2cat")
+
+num_var<-c("s01_salute_psic", "s01_salute_fis", "s01_abit_attiv", "s03_fumo_quanto", "s05_alcool_gg","s07_eta", "s12_giu_morale_gg")
+```
+
+
+```{r include=FALSE}
+for (col in cat_var){
+  df[col] <- lapply(df[col], factor)
+}
+```
+
+**MISSING VALUES**
+
+```{r}
+plot_missing(df)
+```
+
+In this plot we observed that *s03_fumo_quanto* has *76,92%* missing values, this is because people who answered no to the question about currently smoking skipped consequently the following questions regarding smoking. Successively, we will convert all these NAs into zero, as we assumed that people who did not answer to the question of *s03_fumo_quanto* were those who did not smoke.  
+
+```{r echo=FALSE, warning=FALSE , include=FALSE}
+lapply(cat_var,
+       function(col) {
+         ggplot(df, aes_string(col, fill=col))+ 
+           geom_bar()+
+           geom_text(stat='count', aes(label=..count..), vjust=0, angle=-90)+
+           ggtitle(col)+
+           xlab("")+
+           theme(legend.position="none")+
+           coord_flip()})
+```
+
+From these plot we can see how the categorical variables are distributed. Some of them have missing values or empty value assigned. 
+
+
+```{r include=FALSE}
+lapply(num_var,
+       function(col) {
+         ggplot(df, aes_string(col)) + geom_histogram(col='black', fill='forestgreen')+ ggtitle(col)+xlab('Frequency')
+         })
+```
+
+Most of the numerical variables are right-skewed except for age and *s03_fumo_quanto.* There is also the presence of some -99 (meaning "Non lo so/ Non ricordo") in almost all the variables. 
+
+
+**Correlation Matrix**
+
+```{r include=FALSE}
+plot_correlation2 <- function(data, type = c("all", "discrete", "continuous"), maxcat = 20L,
+                             cor_args = list(),
+                             geom_text_args = list(),
+                             title = "Correlation Matrix",
+                             ggtheme = theme_gray(),
+                             theme_config = list("legend.position" = "bottom",
+                                                 "axis.text.x" = element_text(angle = 90))) {
+  ## Declare variable first to pass R CMD check
+  Var1 <- Var2 <- value <- NULL
+  ## Set data to data.table
+  if (!is.data.table(data)) data <- data.table(data)
+  ## Split data
+  split_data <- split_columns(data)
+  ## Match column type and raise appropriate alerts if necessary
+  col_type <- match.arg(type)
+  if (col_type == "continuous") {
+    if (split_data$num_continuous == 0) stop("Not enough continuous features!")
+    final_data <- split_data$continuous
+  }
+  
+  if (col_type == "discrete") {
+    if (split_data$num_discrete == 0) stop("No discrete features found!")
+    final_data <- split_columns(dummify(split_data$discrete, maxcat = maxcat))$continuous
+  }
+  
+  if (col_type == "all") {
+    if (split_data$num_discrete == 0) {
+      final_data <- data
+    } else {
+      final_data <- split_columns(dummify(data, maxcat = maxcat))$continuous
+    }
+  }
+  
+  ## Calculate correlation and melt into tidy data format
+  cor_args_list <- list("x" = final_data)
+  plot_data <- reshape2::melt(do.call("cor", c(cor_args_list, cor_args)))
+  ## Create ggplot object
+  output <- ggplot(plot_data, aes(x = Var1, y = Var2, fill = value)) +
+    geom_tile() +
+    scale_fill_gradient2("Correlation Meter", limits = c(-1, 1), low = "#0571b0", high = "#ca0020", space = "Lab") +
+    xlab("") + ylab("")
+  if (ncol(final_data) <= 20) {
+    geom_text_args_list <- list("mapping" = aes(label = round(value, 2)))
+    output <- output +
+      do.call("geom_text", c(geom_text_args_list, geom_text_args))
+  }
+  ## Plot object
+  class(output) <- c("single", class(output))
+  plotDataExplorer(
+    plot_obj = output,
+    title = title,
+    ggtheme = ggtheme,
+    theme_config = theme_config
+  )
+}
+```
+
+
+```{r echo=FALSE}
+plot_correlation2(df, type = 'c',cor_args = list( 'use' = 'complete.obs'), title =" Correlation Matrix", ggtheme = theme_gray(),theme_config = list(legend.position = "right", axis.text.x = element_text(angle =90)))
+```
+
+From the correlation plot we observed that *s01_salute_psic* is correlated positively with *s12_giu_morale_gg*, *s01_abit_attv*, and *s01_salute_fis.*
+
+## Variables' Manipulation and NA's Removal
+
+After observing the variables we decided to make some manipulation:
+
+We create levels for the variable *s12_giu_morale_gg*: 0 means "mai", 1 "at least one day and even the "I don't know"
+
+```{r}
+df$s12_giu_morale_gg<-ifelse(df$s12_giu_morale_gg==0, "0", ">= 1") 
+```
+
+We modify the variable *s03_fumo_att* in a way in which we have: "Yes" for people who are currently smoking while "No" who aren't. 
+
+```{r}
+df$s03_fumo_att<-ifelse(df$s03_fumo_att=='t', "Yes", "No")
+```
+
+We categorize people with mental disorders as the ones who answered 1 or more days to the question
+```{r}
+df$s01_salute_psic<-ifelse(df$s01_salute_psic==0, "No", "Yes")
+```
+
+We categorize people experiencing physical problem as the ones who answered 1 or more days to the question
+```{r}
+df$s01_salute_fis<-ifelse(df$s01_salute_fis==0, "No", "Yes")
+```
+
+For *s03_fumo_quanto* we calculated the median which is 10, and we transformed Nas into 0 as we explained the reason previously under the plot of missing values. Moreover, we found out 64 "I don't know", so we replaced them randomly with a number from 0 to 10. At the end, we transformed -1 (less than one cigarette day) in 0.
+```{r}
+df%>%filter(!(s03_fumo_quanto==-99))%>%summarise(median=median(s03_fumo_quanto)) 
+df$s03_fumo_quanto[is.na(df$s03_fumo_quanto)] = 0 
+length(df$s03_fumo_quanto[df$s03_fumo_quanto == -99]) 
+df$s03_fumo_quanto[df$s03_fumo_quanto == -99]= sample(x=c(0:10), 64, replace=T)
+df$s03_fumo_quanto[df$s03_fumo_quanto == -1]=0 
+```
+
+For the *s05_alcool_gg* variable we removed the missing values, calculated the nmber of "Non lo so" answers and replaced them with random numbers in the range of the variable.
+Afterwards we created 2 different variables, the first one as a categorical with 3 levels indicating different alcool usages and the second one (*Alcohol_use*) telling if a person drinks alcohol or not.
+```{r}
+sum(is.na(df$s05_alcool_gg))
+df=df%>%drop_na(s05_alcool_gg)
+length(df$s05_alcool_gg[df$s05_alcool_gg == -99]) 
+set.seed(66)
+df$s05_alcool_gg[df$s05_alcool_gg == -99]= sample(x=c(1:30), 754, replace=T)  
+df=df%>%mutate(s05_alcool_gg= case_when(s05_alcool_gg==0 ~"0",s05_alcool_gg>0 & s05_alcool_gg<=15 ~"1", s05_alcool_gg>15 ~"2" ))
+df$s05_alcool_gg=as.factor(df$s05_alcool_gg)
+df%>%group_by(s05_alcool_gg)%>%summarise(n())
+
+df$Alcohol_use<-ifelse(df$s05_alcool_gg==0, "No", "Yes")
+```
+
+We categorize people unable to do usual activities as the ones who answered 1 or more days to the question
+```{r}
+df$s01_abit_attiv<-ifelse(df$s01_abit_attiv==0, "0", ">=1")
+```
+
+```{r}
+df$sesso<-ifelse(df$sesso==1, "Male", "Female")
+```
+
+```{r}
+df$lavoro2cat=ifelse(df$lavoro2cat==1,"YesContinue","Nocontinue")
+
+df$diffeconomiche2cat=ifelse(df$diffeconomiche2cat==1,"High","Low")
+```
+
+```{r}
+df<-df %>% mutate(regione=recode(regione, 
+                             "10" ="Piemonte",
+                             "20"="Valle d'Aosta/Vallée d'Aoste", 
+                             "41"="Provincia Autonoma di Trento",
+                             "42"="Provincia Autonoma di Bolzano/Bozen",
+                             "50"="Veneto",
+                             "60"="Friuli-Venezia Giulia",
+                             "70"="Liguria",
+                             "80"="Emilia-Romagna",
+                             "90"="Toscana", 
+                             "100"="Umbria", 
+                             "110"="Marche", 
+                             "120"="Lazio",
+                             "130"="Abruzzo",
+                             "140"="Molise",
+                             "150"="Campania",
+                             "160"="Puglia",
+                             "170"="Basilicata",
+                             "180"="Calabria",
+                             "190"="Sicilia",
+                             "200"="Sardegna",
+                             .default=NA_character_))
+```
+
+We looked at the frequencies for each region by displaying a barplot
+```{r}
+ggplot(df)+ 
+  geom_bar(aes(x=regione, fill=regione))+
+  ggtitle("Distribution of people per Region")+
+  xlab("")+
+  theme(legend.position="none")+
+  coord_flip()
+```
+
+
+```{r}
+m=sum(is.na(df)) 
+g=round((m/31934)*100, digits = 2) #percentage of Na
+m
+g
+```
+`r m` missing values over 31934 obs (`r g`% of missing values in the df) so we decided to delete these rows.
+
+```{r}
+df<-df %>% drop_na()
+```
+
+## Generic analysis
+
+Here we are creating **3 sections** to continue with the analysis:
+
+```{r}
+df <- as.data.frame(unclass(df), stringsAsFactors = TRUE)
+str(df)
+```
+
+```{r include=FALSE}
+multiplot <- function(..., plotlist=NULL, file, cols=1, layout=NULL) {
+
+  library(grid)
+
+
+
+  # Make a list from the ... arguments and plotlist
+
+  plots <- c(list(...), plotlist)
+
+
+
+  numPlots = length(plots)
+
+
+
+  # If layout is NULL, then use 'cols' to determine layout
+
+  if (is.null(layout)) {
+
+    # Make the panel
+
+    # ncol: Number of columns of plots
+
+    # nrow: Number of rows needed, calculated from # of cols
+
+    layout <- matrix(seq(1, cols * ceiling(numPlots/cols)),
+
+                    ncol = cols, nrow = ceiling(numPlots/cols))
+
+  }
+
+
+
+ if (numPlots==1) {
+
+    print(plots[[1]])
+
+
+
+  } else {
+
+    # Set up the page
+
+    grid.newpage()
+
+    pushViewport(viewport(layout = grid.layout(nrow(layout), ncol(layout))))
+
+    # Make each plot, in the correct location
+
+    for (i in 1:numPlots) {
+
+      # Get the i,j matrix positions of the regions that contain this subplot
+
+      matchidx <- as.data.frame(which(layout == i, arr.ind = TRUE))
+
+      print(plots[[i]], vp = viewport(layout.pos.row = matchidx$row,
+
+                                      layout.pos.col = matchidx$col))
+
+    }
+
+  }
+
+}
+```
+
+**Section Health**
+
+```{r echo=FALSE}
+msp1<-ggplot(df, aes(x=s01_salute_psic))+
+  geom_bar(fill="cadetblue1")+
+  labs(title = "Mental health issue", x="Levels of psicological problem")
+
+msp2<-ggplot(df, aes(x=s01_salute_fis))+
+  geom_bar(fill="chartreuse1")+
+  labs(title = "Physical problems", x="Levels of physical problem")
+
+msp3<-ggplot(df, aes(x=s01_abit_attiv))+
+  geom_bar(fill="chocolate1")+
+  labs(title = "Inability to carry out usual activities", x="Levels of inability")
+
+msp4<-ggplot(df, aes(x=s12_giu_morale_gg))+
+  geom_bar(fill="burlywood1")+
+  labs(title = "Morale", x="Levels for low morale")
+
+mplot1 <- multiplot(msp1, msp2, msp3, msp4, cols=2)
+```
+
+**Section Habits**
+
+```{r echo=FALSE, warning=FALSE}
+msp5<-ggplot(df, aes(x=s03_fumo_att))+
+  geom_bar(fill="brown")+
+  labs(title = "Smokers", x="Smoke status")
+
+msp6<-ggplot(df, aes(x=Alcohol_use))+
+  geom_bar(fill="firebrick1")+
+  labs(title = "Alcohol", x="Levels for drinking")
+
+msp7<-ggplot(df, aes(x=s03_fumo_quanto))+
+  geom_histogram(fill="gray")+
+  labs(title = "Smoke days", x="Days of smoking")
+
+msp80<-ggplot(df, aes(x=s05_alcool_gg))+
+  geom_bar(fill="gray2")+
+  labs(title = "days of drinking", x="drinking days")
+
+
+mplot3<-multiplot(msp5,msp6, msp7, msp80, cols=2)
+```
+
+**Section Personal info**
+
+```{r echo=FALSE}
+msp8<-ggplot(df, aes(x=s07_eta))+
+  geom_histogram(fill="darkorchid1")+
+  labs(title = "Age", x="Group age")
+
+msp9<-ggplot(df, aes(x=lavoro2cat))+
+  geom_bar(fill="orangered1")+
+  labs(title = "Employment", x="Status")
+
+msp10<-ggplot(df, aes(x=diffeconomiche2cat))+
+  geom_bar(fill="royalblue1")+
+  labs(title = "Economic situation", x="Level")
+
+msp11<-ggplot(df, aes(x=sesso))+
+  geom_bar(fill="yellow1")+
+  labs(title = "Gender", x="Level")
+
+
+mplot2 <- multiplot(msp8, msp9, msp10,msp11,cols=2)
+```
+
+## Geographical Distribution
+
+Here we created a representation for people with mental health issue in Italy.
+
+```{r}
+sum(df$s01_salute_psic=="Yes") #total number of individual with mental health issue
+```
+
+The response percentage is calculated in this way: 
+$$ \text{Perc people with mental issue per region}   = (\text{people with mental health issue per region}/ \text{total number of people with mental health)} * 100$$
+
+```{r}
+df_region<-df%>%select(regione, s01_salute_psic)%>%
+  group_by(regione)%>%
+  summarise(tot=round((sum(s01_salute_psic=="Yes")/8764)*100,digits=2))
+```
+
+There isn't data for Lombardia (introduced as 0 value in the df)
+
+```{r}
+lombardia = data.frame("Lombardia", 0)
+names(lombardia)=c("regione","tot")
+df_full=rbind(df_region,lombardia)
+df_full
+```
+
+
+```{r}
+IT_blank <- gisco_get_nuts(
+  resolution = 20, 
+  nuts_level = 2,
+  country = "Italy") %>%
+  select(NUTS_ID, NAME_LATN)
+```
+
+```{r}
+IT_loc <- st_transform(IT_blank, 32632)
+```
+
+```{r}
+names(IT_loc)[2] <- "regione"
+IT_data <- IT_loc %>%
+  left_join(df_full)
+```
+
+```{r echo=FALSE}
+pal<-brewer.pal(8, "Blues")
+plot(IT_data[, "tot"],
+     breaks = c(0,1,2,4,6,8,10,12,13),
+     pal = pal,
+     main = "Distribution of people with mental health issue", 
+     key.pos = NULL)
+colkey(col=c("#F7FBFF","#DEEBF7","#C6DBEF","#9ECAE1","#6BAED6","#4292C6","#2171B5","#084594"), clim = range(IT_data$tot), clab=c(" ", "Values in percentage"), add=TRUE, dist = c(-0.15), breaks= c(0,1,2,4,6,8,10,12,13))
+```
+
+The map shows that the highest percentages of people with mental health issue are in Veneto and Emilia-Romagna while the lowest are in Valle D'Aosta.
+
+
+# Contingency table part
+
+We will now construct some contingency tables to condense data and check relations between our variable of interest and the others. 
+
+**Contingency table: Economic difficulties vs Mental Health**
+
+*diffeconomiche2cat* was computed considering question 14.5, i.e.,:  "With the financial resources at your disposal (from your own or family income) how do you make ends meet month?"
+
+ - 2: Low: Very easily + Fairly easily
+ - 1: High: With some difficulty + with many difficulties
+
+
+```{r echo=FALSE}
+t_graph=data.frame(Mental_health=c("Feel bad","Feel good","Feel bad","Feel good"),
+           Conditional_probabilities=c(0.31,0.69,0.25,0.75),
+           Economic_Difficulties=c("High","High","Low","Low"))
+
+g=ggplot(t_graph, aes(x=Mental_health, y=Conditional_probabilities, fill=Economic_Difficulties)) + 
+  geom_bar(stat="identity", position=position_dodge())+
+  ggtitle("Mental heath status VS Economic difficulties")+
+  theme(plot.title = element_text(size = 18, hjust=0.5, face = "bold"),         
+        panel.background = element_rect(fill = "gray96", size = 0.5, linetype = "solid"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        plot.background = element_rect(fill = "gray96"),
+        legend.position = "right",
+        axis.line = element_line(color = "black", size = 0.5, linetype = "solid"))
+g+scale_fill_manual("Legend",values=c("mediumvioletred","darkolivegreen4"))
+```
+
+```{r include=FALSE}
+df%>%select(diffeconomiche2cat, s01_salute_psic)%>%
+  group_by(diffeconomiche2cat, s01_salute_psic)%>%
+  summarise(n())
+```
+
+```{r}
+table <- data.frame(EconDIFF  = c("High","High" ,"Low", "Low"),
+                      Mental_health = c("Feel Good", "Feel Bad", "Feel Good", "Feel Bad"),
+                       Count = c(9635, 4333, 13361,4431))
+t0 = xtabs(Count ~ EconDIFF + Mental_health, table)
+#mosaicplot(t0)
+tb = addmargins(xtabs(Count ~ EconDIFF + Mental_health, table)) #to add margin 
+tb %>% knitr::kable() %>% kable_styling()%>%column_spec(1,bold=T)
+```
+
+```{r}
+#joint prob
+tb_j=prop.table(t0)
+tb_j %>% knitr::kable(digits = 3)  %>% kable_styling()
+```
+It seems that people with no economic difficulties feel better than the ones with difficulties.
+
+```{r}
+#marginal prob
+tb_m = addmargins(prop.table(t0))
+tb_m %>% knitr::kable(digits = 3)  %>% kable_styling()
+```
+Roughly the 28% of the interviewed declares to feel bad.
+
+```{r}
+#conditional prob to economic difficulties
+tb_c = prop.table(xtabs(Count ~ EconDIFF + Mental_health, table),1)
+tb_c %>% knitr::kable(digits = 3)  %>% kable_styling()
+tb_c[1]/tb_c[2]
+```
+Considering who does not have economic difficulties, the probability of feeling good in the last 30 days is 75% while the probability of feeling bad is 25%.
+
+While considering who have economic difficulties, the probability of feeling good in the last 30 days is 69%, while the probability of feeling bad is 31%
+
+We obtain a relative risk of 1.25, which means that the probability of having bad feeling for people with high economic difficulties is 25% larger.  
+
+
+*Confidence Intervals for the ratio of proportion*
+```{r}
+ci_risk = PropCIs::riskscoreci(x1 = tb["High","Feel Bad"],
+                               n1 = tb["High","Sum"],
+                               x2 = tb["Low","Feel Bad"],
+                               n2 = tb["Low","Sum"],
+                               conf.level = .95)
+ci_risk
+```
+
+The interval does not contain the 1 value, this means that having economic difficulties or not has a significant impact on feeling bad. 
+
+With the chi square test we want to assess if the two categorical variable are statistically independent or not
+```{r}
+chisq.test(t0,correct = F)
+```
+The value of the statistic is 146.52 which is large for a $X^{2}$ distribution with
+1 df, so we can say that the two variables "diffeconomiche2cat" and "s01_salute_psic" are dependent. 
+
+If we want to rely on relative quantities we must compute the odds and the odds ratio for testing the independence of our variables:
+
+```{r}
+odd1 = ( tb_c[1] / (1-tb_c[1]) )  
+odd2 = ( tb_c[2] / (1-tb_c[2]) ) 
+odd_ratio = odd1/odd2 
+odd_ratio
+```
+The odds for people in difficulties to be in a bad mental status is **0.45**, 0.45 to be in bad health for each one being in good. While the odds for people not in difficulties to be in a bad mental status are **0.33**, 0.33 to be in bad health for each one being in good.
+The odds ratio is equal to `r odd_ratio` , this means that the odds of being in a bad mental status are 35% higher for people in economic difficulties. 
+
+We assess the significance of the odds ratio by computing it's confidence interval:
+
+```{r}
+exp(log(odd_ratio) + qnorm(c(0.025, .975)) *  sqrt(sum(1/c(t0))))
+```
+The CI doesn't contain the 1 value, we can state that there is dependence between the two variables. 
+
+**Contingency Table: Mental Health vs Sesso**
+
+```{r echo=FALSE}
+dfeta= df%>%filter(s07_eta>=35)
+t1_graph=data.frame(Mental_health=c("Feel bad","Feel good","Feel bad","Feel good"),
+           Conditional_probabilities=c(0.331,0.669,0.217,0.783),
+           Gender=c("Female","Female","Male","Male"))
+
+g=ggplot(t1_graph, aes(x=Mental_health, y=Conditional_probabilities, fill=Gender)) + 
+  geom_bar(stat="identity", position=position_dodge())+
+  ggtitle("Mental heath status VS Gender")+
+  theme(plot.title = element_text(size = 18, hjust=0.5, face = "bold"),         
+        panel.background = element_rect(fill = "gray96", size = 0.5, linetype = "solid"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_blank(),
+        plot.background = element_rect(fill = "gray96"),
+        legend.position = "right",
+        axis.line = element_line(color = "black", size = 0.5, linetype = "solid"))
+g+scale_fill_manual("Legend",values=c("mediumvioletred","darkolivegreen4"))
+```
+
+To avoid Simpson's Paradox we decide to proceed with the contingency analysis by looking at people with an age >=35.
+```{r include=FALSE}
+dfeta= df%>%filter(s07_eta>=35)
+dfeta%>%select(sesso, s01_salute_psic)%>%
+  group_by(sesso, s01_salute_psic)%>%
+  summarise(n())
+```
+
+```{r}
+table <- data.frame(Gender=c("Female", "Female", "Male", "Male"),
+                    Mental_health  = c("Feel Bad", "Feel Good", "Feel Bad", "Feel Good"),
+                       Count = c(4180, 7931, 2517,8714))
+t0 = xtabs(Count ~ Gender+Mental_health, table)
+tb = addmargins(xtabs(Count ~ Gender + Mental_health, table)) #to add margin 
+tb %>% knitr::kable() %>% kable_styling()%>%column_spec(1,bold=T)
+```
+
+```{r}
+#joint prob
+tb_j=prop.table(t0)
+tb_j %>% knitr::kable(digits = 3)  %>% kable_styling()
+```
+In a population with age higher >=35 it seems that *females* with mental health problems are *more than males*.
+
+```{r}
+#marginal prob
+tb_m = addmargins(prop.table(t0))
+tb_m %>% knitr::kable(digits = 3)  %>% kable_styling()
+```
+**51.9%** of the population interviewed is female.
+
+```{r}
+#Mental health status conditional on gender 
+tb_c = prop.table(t0,1) 
+tb_c %>% knitr::kable(digits = 3)  %>% kable_styling()
+```
+
+Considering female interviewees, the probability of feeling bad in the last 30 days is 34.5%, while the probability of feeling good is **65.5%**.
+
+Considering male interviewees, the probability of feeling bad in the last 30 days is 22.4%, while the probability of feeling good is **77.6%**.
+
+
+*Relative risk*
+```{r}
+tb_c[4]/tb_c[3]  
+```
+A man is **18%** more likely to feel good mentally than a female.
+
+```{r}
+tb_c[1]/tb_c[2]
+```
+A female is **54%** more likely to feel bad mentally than a male.
+
+
+*Confidence Intervals for the ratio of Proportion*
+
+```{r}
+ci_risk = PropCIs::riskscoreci(x1 = tb["Female","Feel Bad"],
+                               n1 = tb["Female","Sum"],
+                               x2 = tb["Male","Feel Bad"],
+                               n2 = tb["Male","Sum"],
+                               conf.level = .95)
+ci_risk
+```
+The interval does not contain the 1 value, this means that the gender has a *significant effect* on mental health. 
+
+With the chi square test we want to assess if the two categorical variable are statistically independent or not.
+```{r}
+chisq.test(t0,correct = F)
+```
+The value of the Chi-Squared statistic is very big (417.21) and the p-value associated is very low, so we can say that the two variables "s01_salute_psic" and "sesso" are *dependent* for the selected population. 
+
+If we want to rely on relative quantities we must compute the odds and the odds ratio for testing the independence of our variables:
+
+```{r}
+oddm = ( tb_c[2] / (1-tb_c[2]) )
+oddm
+oddf = ( tb_c[1] / (1-tb_c[1]) ) 
+oddf
+odd_ratio = oddf/oddm
+odd_ratio
+```
+The estimated odds for Males equal *0.29*, which means that there is 1 bad mental health for each 3.45 good mental health.
+
+The estimated odds for Female equal *0.52*, which means that there is 1 bad mental health for each 2 good mental health.
+
+The odds ratio is equal to *1.82*, which means that the odds of having bad mental health problem are 82% higher for female. 
+
+We assess the significance of the odds ratio by computing it's confidence interval:
+```{r}
+
+ci<-exp(log(odd_ratio) + qnorm(c(0.025, .975)) *  sqrt(sum(1/c(t0))))
+ci
+```
+The CI `r ci` doesn't contain the value 1, we can state that there is *dependence* between the two variables. 
+
+# Poisson Log-Linear Model
+
+We create a table with the variable s01_salute_psic, s03_fumo_att and Alcohol use.
+
+```{r}
+df%>%group_by(Alcohol_use, s03_fumo_att, s01_salute_psic)%>%summarise(n())
+```
+
+```{r}
+table_cat <- array(data = c(1479, 3760, 3450, 9528, 666, 2859, 1734, 8284), 
+                         dim = c(2,2,2), 
+                         dimnames = list("cigarette" = c("yes","no"),
+                                         "mental issue" = c("yes","no"),
+                                         "alcohol" = c("yes","no")))
+```
+
+```{r}
+#flatten the table
+ftable(table_cat, row.vars = c("alcohol","cigarette"))
+```
+
+Our goal is to study how the cell counts depend on the levels of the categorical variables.
+
+```{r}
+df%>%group_by(Alcohol_use)%>%summarise(n())
+18217/(13543+18217)
+```
+
+Before proceding we explore the data we see that 31760 people participated in the survey and *57.4%* have drunk alcohol in the last 30 days.
+
+```{r indlude=FALSE}
+addmargins(table_cat)
+```
+
+Below we calculate proportions across the columns along the rows for each layer. 
+
+```{r}
+prop.table(table_cat, margin = c(1,3))
+```
+
+We see that those people who smoked and drank alcohol, **30%** also had mental issue in the last 30 days. Likewise, of those people who did not smoke or drink alcohol, **74%** also did not present mental disorders. It seems that there is a kind of relationship across these variables.
+
+Now we’re ready to try some loglinear modeling. We will use the glm function, which means that we need to transform our data into a different format.
+
+```{r}
+df_1 <- as.data.frame(as.table(table_cat)) #to convert the array into a table and then into a df
+df_1[,-4] <- lapply(df_1[,-4], relevel, ref = "no")#set the reference level for our three variables to “no”, so our model coef will be expressed in terms of “yes” answers
+df_1
+```
+
+```{r}
+mod0 <- glm(Freq ~ cigarette + mental.issue + alcohol, 
+            data = df_1, family = poisson)
+
+equatiomatic::extract_eq(mod0)
+```
+
+```{r}
+summary(mod0)
+```
+
+Looking at the summary it appears that this is a great model. We see highly significant coefficients and p-values near 0. But for loglinear models we want to check the residual deviance. As a rule of thumb, we’d like it to be close in value to the degrees of freedom. Here we have **427.72 on 4 degrees of freedom**. This indicates a **poor fit**. We can calculate a p-value. 
+
+```{r}
+pchisq(deviance(mod0), df = df.residual(mod0), lower.tail = F)
+```
+The null hypothesis of this test is that the expected frequencies satisfy the given loglinear model. Clearly they do not!
+
+A more intuitive way to investigate fit is to compare the fitted values to the observed values. One way we can do that is to combine the original data with the fitted values, like so:
+```{r}
+cbind(mod0$data, fitted(mod0))
+```
+
+Our fitted model is not so far from the observed data and it can be improved.
+
+The coefficients in this model can be interpreted as odds if we exponentiate them.
+
+```{r}
+exp(coef(mod0)[3])
+```
+According to this model, the odds of having mental problem in the last 30 days are about *0.38* to 1, regardless of whether you use alcohol or smoke cigarettes. We know that’s a good estimate but improvable. 
+
+Let’s fit a more complex model that allows variables to be associated with one another, but maintains the same association regardless of the level of the third variable. We call this model *homogeneous association*. This says that, for example, alcohol use and mental problem yes have some sort of relationship, but that relationship is the same regardless of whether or not people smoke.
+
+```{r}
+#pairwise association
+mod1 <- glm(Freq ~ (cigarette + mental.issue + alcohol)^2, 
+            data = df_1, family = poisson)
+
+equatiomatic::extract_eq(mod1, wrap = TRUE, terms_per_line = 5)
+```
+
+```{r}
+summary(mod1)
+```
+
+This model fits better. Notice the residual deviance **(0.015)** compared to the degrees of freedom (1). We can calculate a p-value:
+
+```{r}
+pchisq(deviance(mod1), df = df.residual(mod1), lower.tail = F)
+```
+
+The p-value says we haven't enough evidence to reject the null hypothesis that the expected frequencies satisfy our model. 
+Once again we can compare the fitted and observed values and see how well they match up:
+
+```{r}
+cbind(mod1$data, fitted(mod1))
+```
+
+So the model seems to fit very well, but to describe the association between the variables we look at the coefficients of the interactions. By exponentiating the coefficients, we get odds ratios. For example, let’s look at the coefficient for “mental.issueyes:alcoholyes”.
+
+```{r}
+exp(coef(mod1)["mental.issueyes:alcoholyes"])
+```
+
+People who manifested mental issue in the last 30 days have estimated odds of drinking alcohol that are *1.14 times* the estimated odds for people who did not manifest mental problem (not so higher).
+
+It’s a good idea to calculate a *confidence interval* for these odds ratio estimates:
+
+```{r}
+exp(confint(mod1, parm = c("cigaretteyes:mental.issueyes",
+                                "cigaretteyes:alcoholyes",
+                                "mental.issueyes:alcoholyes")))
+```
+
+The associations are quite weak, the only notable one is the one between alcohol and smoking.
+We see that the odds of drinking if you smoke cigarettes is at least **1.63 times higher** than the odds of drinking if you don't smoke, and vice versa. 
+
+Now we try a three way interaction and create a *saturated model*, with as many coef as the number of cells in our table.
+
+```{r}
+mod2 <- glm(Freq ~ cigarette * mental.issue * alcohol, 
+            data = df_1, family = poisson)
+
+equatiomatic::extract_eq(mod2, wrap = TRUE, terms_per_line = 5)
+```
+
+```{r}
+summary(mod2)
+```
+
+The deviance of this model is basically 0 on 0 degrees of freedom. The fitted counts match the observed counts:
+
+```{r}
+cbind(mod2$data, fitted(mod2))
+```
+
+All things being equal, we prefer a simpler model. We usually don’t want to finish with a saturated model that perfectly fits our data. However it’s useful to fit a saturated model to verify the *higher-order interaction is statistically not significant*. We can verify that the homogeneous association model fits just as well as the saturated model by performing a likelihood ratio test.
+
+```{r}
+anova(mod1, mod2)
+```
+
+```{r}
+pchisq( 0.14997, df = 1, lower.tail = F)
+```
+This says we accept the null hypothesis that mod1 fits *just as well* as mod2!
+
+We could try models with only certain interactions. For example, look at the following model:
+
+```{r}
+mod3 <- glm(Freq ~ (cigarette * alcohol) + (mental.issue*alcohol), 
+            data = df_1, family = poisson) 
+
+extract_eq(mod3, wrap = TRUE, terms_per_line = 4)
+```
+
+This model fits interactions for cigarette and alcohol, and mental.issue and alcohol, but not cigarette and mental.issue. The implication is that mental.issue and cigarette use are independent of one another, controlling for alcohol use. Then we perform a LRT:
+
+```{r}
+anova(mod3, mod1)
+```
+
+```{r}
+pchisq(9.3967, df = 1, lower.tail = F)
+```
+
+The **p-value is tiny**. The probability of seeing such a change in deviance (9.3967) if the models really were no different is remote. There appears to be good evidence that the *homogeneous association model provides a much better fit than the model that assumes conditional independence between cigarette and mental issue*.
+
+```{r}
+D0 <- sum(abs(df_1$Freq - fitted(mod0)))/(2*sum(df_1$Freq))
+diss0<-round(D0, 5)
+
+D1<-sum(abs(df_1$Freq - fitted(mod1)))/(2*sum(df_1$Freq))
+diss1<-round(D1, 5)
+
+D2<-sum(abs(df_1$Freq - fitted(mod2)))/(2*sum(df_1$Freq))
+diss2<-round(D2, 5)
+
+D3<-sum(abs(df_1$Freq - fitted(mod3)))/(2*sum(df_1$Freq))
+diss3<-round(D3, 5)
+```
+
+```{r}
+diss_tab<-cbind(D0,D1,D2,D3)
+colnames(diss_tab)<- c("Conditional Indip Mod", "Homogeneous Mod", "Saturated Mod", "Selected Inter Mod")
+rownames(diss_tab)<- "Dissimilarity Index"
+diss_tab%>% knitr::kable(digits = 3) %>% kable_styling()
+```
+
+Finally we computed the *dissimilarity index* for all the model and saw that the data follow the model closely even if the models are not perfect!
+As said before the homogeneous model is the best even if the dissimilarity index of the saturated is lower (too complex, so we prefer the simpler)
+
+# Association Selection
+
+Before fitting the logistic regressions for the further analysis, we would like to do an association selection by using the **mosaic plot** to summarize the relationship between the mental health variable and other categorical variables. 
+
+The strength of a relation can be thought as a measure of how much the observed values deviate from the values in case of independence.The **Pearson standardized residuals** measure the departure of each cell from independence and show the strength and direction of the association. The strength is given by the absolute value of the residual; the direction by its sign. A residual greater than *2* or less than *-2* represents a significant departure from the independence. 
+
+Moreover, regarding colors of the cells, a positive sign is for blue shades and negative sign is for red ones. Blue means there are more observations in the cell than would be expected under the null model (independence). Red means there are fewer observations than would have been expected.
+
+The **Chi-square test $X^2$** is given by the sum of all the standardized residuals. It tests whether the evidence in the sample is strong enough to generalize the association for a larger population. The null hypothesis for a chi-square independence test is that two categorical variables are independent in some population. We can determine the p-value corresponding to the $X^2$ test value. When the p-value is low (<0.01) means that the two categorical variables are related in our population.
+
+**Mental problem vs physical issue**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, s01_salute_fis)%>%summarise(Freq=n())
+temporary_df
+loglm <- glm(Freq ~ s01_salute_psic +s01_salute_fis, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main='Mental and Physical')
+
+```
+
+First of all, we would like to discover the relationship between mental and physical health. 
+
+The mosaic plot is based on *joint probabilities.* The widths of the cells are proportional to the percentage of no problem with physical health and yes problem with physical health, respectively. The heights of the boxes are proportional to percent of presence of mental health.
+
+The biggest cell contains observations who do not suffer physical and mental health, nearly **60%**.  
+
+By looking at pearson standardized residuals values as all the cells have residuals higher than 2 or lower than -2, and looking at the p-value which is clearly lower than 0.01, we can say that there is an association between physical and mental health. 
+
+After this, we did also the association selection for all categorical variables present in our subset dataset. At the end, we found out that mental health is related to following variables: moral status (feeling happy lately), inability (carrying out everyday activities without being disturbed by health issues), employment status (doing a continuous vs discontinuous job), gender, and economic status. 
+
+**Mental health vs morale**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, s12_giu_morale_gg)%>%summarise(Freq=n())
+loglm <- glm(Freq ~ s01_salute_psic +s12_giu_morale_gg, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main="Mental and Morale status")
+
+21297/(1699+21297+4845+3919)
+```
+In this plot, the biggest cell is the one containing people who feel happy lately and do not have mentally healthy. 
+
+**Mental health vs inability**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, s01_abit_attiv)%>%summarise(Freq=n())
+loglm <- glm(Freq ~ s01_salute_psic + s01_abit_attiv, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main="Mental and Inability")
+
+21255/(1741+21255+3785+4979)
+```
+
+From this plot we observed that **67%** carried out everyday activities without being disturbed by health issue and not have mental disturbances. 
+
+
+**Section Personal Info**
+
+**Mental health vs Work situation**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, lavoro2cat)%>%summarise(Freq=n())
+loglm <- glm(Freq ~ s01_salute_psic + lavoro2cat, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main="Mental and Employment status")
+```
+
+**Mental health vs gender**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, sesso)%>%summarise(Freq=n())
+loglm <- glm(Freq ~ s01_salute_psic + sesso, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main="Mental and Gender")
+```
+
+**Mental issue vs economic**
+```{r}
+temporary_df<-df%>%group_by(s01_salute_psic, diffeconomiche2cat)%>%summarise(Freq=n())
+loglm <- glm(Freq ~ s01_salute_psic + diffeconomiche2cat, family = poisson, data =temporary_df)
+
+vcdExtra::mosaic.glm(loglm, main="Mental and Economic situation")
+```
+
+
+# Logistic Regression 
+
+```{r}
+df%>%group_by(s01_salute_psic)%>%
+  summarise(n())
+```
+we notice that our dataset is strongly unbalanced on out response variable :
+
+*No              22996,
+*Yes              8764.
+
+We deal with this issue by performing a ovun.sample function on the dataset, which random oversamples
+minority examples:
+
+```{r}
+library(ROSE)
+balanceddata=ovun.sample(s01_salute_psic ~ ., data = df, method = "both", p=0.5, N=nrow(df), seed = 1)$data
+table(balanceddata$s01_salute_psic)
+```
+After the balancing we see that the situation is much better. 
+
+We will run our logistic regressions both with unbalanced and balanced dataset and see the difference from using the two datasets. 
+
+First of all we will run the logistic regression with only variables regarding alcohol and smoking:
+```{r}
+#unbalanced
+modellog = glm(s01_salute_psic ~ s03_fumo_att+s03_fumo_quanto+s05_alcool_gg, data = df, family = "binomial")
+print(summ(modellog, model.info = F, model.fit = F,confint = T))
+test_prob = predict(modellog, type = "response") #probabilities
+test_roc = pROC::roc(df$s01_salute_psic ~ test_prob, plot = TRUE, print.auc = TRUE)
+summary(modellog)
+
+#balanced
+modellog_balaced= glm(s01_salute_psic ~ s03_fumo_att+s03_fumo_quanto+s05_alcool_gg, data = balanceddata, family = "binomial")
+print(summ(modellog, model.info = F, model.fit = F,confint = T))
+test_prob_balanced = predict(modellog_balaced, type = "response") #probabilities
+test_roc_balanced = pROC::roc(balanceddata$s01_salute_psic ~ test_prob_balanced, plot = TRUE, print.auc = TRUE)
+summary(modellog_balaced)
+```
+Both of the two models not only have very similar and low ROC values,also the coefficient estimates are really similar. So it is better to continue the analysis with unbalanced dataset. The fact that the even lower ROC score for balanced dataset may be caused by the overfitting, one of the disadvantages of oversampling.The ROC, that is nearly **0.5**, means that the predictors are making random guesses. 
+
+
+Now let interpret the coefficient of those variables that have a significant p-value. 
+
+**fumo_attYES:**
+Holding other variables fixed, people who currently smoke cigarettes (*Fumo_attYES*) increase the log odds of having mental health disturbances by 0.102, comparing to FUMO_attNo (who do not have the habit of smoking)
+
+**alcool_gg:**
+It has three levels.
+Holding other variables fixed, people who drink alcohol at medium level, 1 to 15 times (*05_alcool_gg1*), will increase the log odds of having mental health disturbances by 0.186, comparing to people who did not drink any alcohol in the last 30 days (*s05_alcool_gg0*). Its p-value indicates that it is really significant determining mental health disturb.
+
+*Deviance:*
+The difference between Null deviance and Residual deviance tells us what if the model is a good fit. Null deviance is the value when you only have intercept in your equation with no variables and Residual deviance is the value when you are taking all the variables into account. It makes sense to consider the model good if that difference is big enough.
+In our case we can say that the model is a good fit. 
+
+```{r}
+library(aod)
+wald.test(b = coef(modellog), Sigma = vcov(modellog), Terms = 4:5)
+```
+We can test for an overall effect of amount of alcohol people assume (*s05_alcool_gg*) using the wald.test function of the aod library. 
+The chi-squared test statistic of 58.8, with two degrees of freedom is associated with a p-value of 1.7e-13 indicating that the overall effect of rank is statistically significant.
+
+```{r}
+confint(modellog)
+```
+We observed that all coefficients are inside the confidence interval.
+
+```{r}
+## odds ratios and 95% CI
+exp(cbind(OR = coef(modellog), confint(modellog)))
+
+```
+We also calculated the odds ratio for each coefficients: 
+
+All else being equal, people who currently smoke cigarettes have **10%** more odds of suffering psychological disturbances than people who do not smoke.
+
+People who consume alcohol 1 to 15 times in the last 30 days have **20.4%** more odds of suffering psychological health disturbances than people didn't drink alcohol lately.
+
+```{r}
+#difference in deviance
+with(modellog, null.deviance - deviance)
+
+#difference in degree of freedom
+with(modellog, df.null - df.residual)
+
+#p_value
+with(modellog, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+```
+One measure of model fit is the significance of the overall model. This test asks whether the model with predictors fits significantly better than a model with just an intercept (i.e., a null model). The test statistic is the difference between the residual deviance for the model with predictors and the null model. The test statistic is distributed chi-squared with degrees of freedom equal to the differences in degrees of freedom between the current and the null model.
+
+The chi-square of 72.28722 with 4 degrees of freedom and an associated p-value of less than 0.001 tells us that our model as a whole fits significantly better than an empty model. However the AUC ROC score suggests us that the model is predicting randomly. 
+
+## Logistic regression 2
+
+Next, from the outputs of association selection we fit in the regression model variables that resulted to be associated with *s01_salute_psic.* We added also variables about smoke and alcohol. 
+```{r}
+modellog_selected = glm(s01_salute_psic ~ s01_salute_fis+ s12_giu_morale_gg+s05_alcool_gg+s01_abit_attiv+ sesso+diffeconomiche2cat+lavoro2cat+ s03_fumo_att+s03_fumo_quanto + s07_eta, data = df, family = "binomial")
+summary(modellog_selected)
+test_prob = predict(modellog_selected, type = "response") #probabilities
+test_roc = pROC::roc(df$s01_salute_psic ~ test_prob, plot = TRUE, print.auc = TRUE)
+summary(modellog_selected)
+
+
+modellog_selected_balanced= glm(s01_salute_psic ~ s01_salute_fis+ s12_giu_morale_gg+s05_alcool_gg+s01_abit_attiv+ sesso+diffeconomiche2cat+lavoro2cat+ s03_fumo_att+s03_fumo_quanto+s07_eta, data = balanceddata, family = "binomial")
+test_prob_balanced = predict(modellog_selected_balanced, type = "response") #probabilities
+test_roc_balanced = pROC::roc(balanceddata$s01_salute_psic ~ test_prob_balanced, plot = TRUE, print.auc = TRUE)
+summary(modellog_selected_balanced)
+```
+
+The AUC ROC scores for both models are better than the ones only with smoke and alcohol variables. As the outputs from the two do not show significant differences, We kept the one with unbalanced dataset. Here we still see the overfitting effect on unbalancing dataset that shows slightly lower AUC ROC score. 
+
+We observed that *s01_salute_fisYes*, *s05_alcool_gg*, and *lavoro2catYesContinue*, and *s07_eta* are statistically significant and have **positive** sign. 
+
+So we can say that people who have physical health issue are more likely to have mental health issue than physically healthy ones; People who drank alcohol more than one day in the last 30 days are more likely to suffering for mental health problem than not have habit of drinking; people who work continuously is more like to be have mental health issue than people who have job but work discontinuously; at the end, for every one unit change in age the log odds of of having mental health issue increases by 0.005.
+
+While *s13_giu_morale_gg0*, *s01_abit_attiv0*, *sessoMale*, statistically significant, have **negative** effect on having mental health disturbance comparing to the reference levels.
+
+So we can say that people who did not feel sad lately is less likely to suffer mental health problems; people who did everyday activities not being influenced by bad mood or health issues have less probability to have mental health disturbances; male is less likely to have mental health issues than female. 
+
+At different from the first model, here *s05_alcool_gg2* have a positive and statistically significant effect on mental health disturb. Moreover, now *s03_fumo_attYes* becomes statistically insignificant. These changes may be caused by the present of additional variables. Especially for *s03_fumo_attYes*, there may be variables that are significantly associated both with mental health issue and smoking or drinking attitude. 
+
+Another issue that should be pointed out is that we observed that the variable *diffeconomiche2cat* (economic difficulties) which appeared to be associated to mental health both in the contingency table and the mosaic association selection, now it is not significant. The reason could be the presence of other variables that are strongly associated with it. We were questioning also if it is caused by the presence of the collinearity and we will run VIF to verify it.  
+
+At the end the difference between Null deviance and Residual deviance is big which tells us what if the model is a good fit. 
+
+```{r}
+#diffeence in deviance
+with(modellog_selected, null.deviance - deviance)
+
+#difference in degree of freedom
+with(modellog_selected, df.null - df.residual)
+
+#p_value
+with(modellog_selected, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+```
+The chi-square of 12093.48 with 11 degrees of freedom and an associated p-value equals to 0 tells us that our model as a whole fits significantly better than an empty model.
+
+
+**VIF: IT THERE MULTICOLLINEARITY PROBLEM?**
+```{r}
+car::vif(modellog_selected)
+```
+The model is not affected by multiple collinearity, as all have low VIF values, lower than 5.
+
+## Logistic regression 3
+
+```{r}
+str(df)
+levels(df$diffeconomiche2cat)
+df$diffeconomiche2cat <- relevel(df$diffeconomiche2cat, ref = "Low") 
+modellog_selected_int = glm(s01_salute_psic ~  s12_giu_morale_gg+s01_abit_attiv+lavoro2cat+ sesso+ s07_eta+ s01_salute_fis*diffeconomiche2cat + s03_fumo_att*s05_alcool_gg, data = df, family = "binomial")
+test_prob = predict(modellog_selected_int, type = "response") #probabilities
+test_roc = pROC::roc(df$s01_salute_psic ~ test_prob, plot = TRUE, print.auc = TRUE)
+summary(modellog_selected_int)
+
+#p_value for chi-square
+with(modellog_selected_int, pchisq(null.deviance - deviance, df.null - df.residual, lower.tail = FALSE))
+```
+
+We added an interaction between *s01_salute_fis* and *diffeconomiche2cat*, as economic difficulty seems to be associated also with physical health, in order to explain why economic difficulty is insignificant.
+
+More, we also added the interaction between smoking (*s03_fumo_att*) and alcohol (*s05_alcool_gg*) to verify whether if smoking habit is both associated with alcohol and mental health. 
+
+From the output we observed that the interaction between the presence of physical health disturbance (*s01_salute_fisYes*) and high level of economic difficulties is **statistically significant**. From the positive sign we understood that, all else being equal, people having a physical health issue and high level of economic difficulty are more likely to suffer also psychological problem than people without physical health problem and economic difficulty.
+
+While, the two interactions between smoking and alcohol consumption are **statistically insignificant**.  
+
+The ROC AUC value is **0.0858**, the best one. 
+
+**Graph for model selected interaction**
+```{r}
+range(df$s07_eta)  #18-69 
+summary(modellog_selected_int)
+newdata2 <- with(df, data.frame(s07_eta = rep(seq(from = 10, to = 100, length.out = 100),
+    3), s01_salute_fis= "Yes", s12_giu_morale_gg="0",s01_abit_attiv="0",sesso="Male",diffeconomiche2cat="High",lavoro2cat="YesContinue", s03_fumo_att="Yes",s03_fumo_quanto=median(s03_fumo_quanto), s05_alcool_gg = factor(rep(0:2, each = 100))))
+
+newdata3 <- cbind(newdata2, predict(modellog_selected_int, newdata = newdata2, type = "response",
+    se = TRUE))
+newdata3 <- within(newdata3, {
+    PredictedProb <- plogis(fit)
+})
+head(newdata3)
+
+ggplot(newdata3, aes(x = s07_eta, y = PredictedProb), alpha = 0.2) + geom_line(aes(colour = s05_alcool_gg),
+    size = 1)
+```
+
+The graph shows us how the predicted probabilities of having mental health issues will vary with the increase of the age at each level of alcohol consumption in the last 30 days Although from observing the scale on the y axis, we understood that the predicted probabilities of the three levels do not differ a lot, however we can still say that the medium consumption level (1 to 15 times) are the most likely to suffer the mental health issue. 
+
+For all the three levels, the predicted probabilities of having mental problem increases with the increase of the age. 
+
+**AIC MODEL SELECTION**
+```{r}
+#install.packages("AICcmodavg")
+library(AICcmodavg)
+```
+
+```{r}
+models <- list(modellog, modellog_selected,modellog_selected_int)
+model.names <- c('modellog', 'modellog selected', "modellog interaction")
+aictab(cand.set = models, modnames = model.names)
+```
+
+From this table we can see that the best model is the **third** one where we added all significant variables and interactions, as it has the lowest AIC. Moreover, also from the comparison between the AUC ROC scores we can state that the best one is the third model. 
+
+# Generalized Linear Mixed Model
+
+We want to conclude our analysis by examining the possible *variability among regions* in the country to asses whether divergences such the ones in economic and weather conditions or in different levels of awareness of the issue could lead to different outcomes in the model.
+
+In order to do that we formulate a Logistic linear model in which we assume that our dependent variable follows a *Bernoulli distribution* and the random intercept a *normal one* with a different mean and variance for each region.
+
+MODEL'S EQUATION:
+
+$$
+\begin{aligned}
+  \operatorname{s01\_salute\_psic}_{i}  &\sim \operatorname{Binomial}(n = 1, \operatorname{prob}_{\operatorname{s01\_salute\_psic} = 1} = \widehat{P}) \\
+    \log\left[\frac{\hat{P}}{1 - \hat{P}} \right] &=\alpha_{j[i]} + \beta_{1}(\operatorname{s07\_eta}) + \beta_{2}(\operatorname{s03\_fumo\_att}_{\operatorname{Yes}}) + \beta_{3}(\operatorname{s05\_alcool\_gg}_{\operatorname{1}}) + \beta_{4}(\operatorname{s05\_alcool\_gg}_{\operatorname{2}}) + \beta_{5}(\operatorname{sesso}_{\operatorname{Male}}) \\
+    \alpha_{j}  &\sim N \left(\mu_{\alpha_{j}}, \sigma^2_{\alpha_{j}} \right)
+    \text{, for regione j = 1,} \dots \text{,J}
+\end{aligned}
+$$
+```{r}
+colnames(df)
+fit <- lme4::glmer(s01_salute_psic ~ s07_eta+s03_fumo_att+s05_alcool_gg+sesso+(1 | regione), family = "binomial", data = df, nAGQ = 50)
+jtools::summ(fit, model.info = F, model.fit = F,confint = T)
+```
+
+In the summary we see *Random effects* and *Fixed effects*:
+
+The coefficients' interpretation it's the same of the Logistic Regression model, HOWEVER we're considering the effects of the covariates on the *same REGION* 
+```{r}
+plogis(-1.32+0.19)
+plogis(-1.32-0.65+0.20)
+```
+The predicted probability for a woman who's smoking to have mental health problems is *24.4%*,
+while it's *14.5%* for men. 
+
+```{r}
+cov_m <- diag(as.matrix(vcov(fit)))
+se <- sqrt(as.vector(cov_m))
+(tab <- cbind(Est = fixef(fit), LL = fixef(fit) - 1.96 * se, UL = fixef(fit) + 1.96 *se))
+```
+From the table we can detect the lower and upper intervals for the estimates of a specific region (just one intercept). 
+
+We take a look into *marginal effects* of the model, in particular we use the numeric variable age as varying covariate and we fix the others. The predicted probabilities are then subdivided between females and males. 
+```{r}
+sjPlot::plot_model(fit, type = "emm", terms = c("s07_eta","sesso"), colors = c("#e75480", "#4182dd")) + aes(linetype=group, color=group)
+```
+We can clearly see that marginal effects are significantly *differentiated* by gender, the probability of suffering from psychological problems is relevantly higher for women. 
+
+Taking into account the alcohol usage we want to make an comparative analysis between individuals.
+```{r}
+sjPlot::tab_model(fit,show.r2 = FALSE)
+```
+The odds to have mental health problems for a female being classified in the second level of alcool usage are *1.28* times higher than females with no drinking problems, considering the *SAME REGION*.
+
+From the table we can also have a first glimpse at the random effect: the ICC measure is *0.05*, meaning that *only 5%* of the variance in the model is explained by the Random effect!
+
+Focusing on the *Random effect*:
+```{r}
+lme4::VarCorr(fit)
+ordinal::ranef(fit)$regione
+range(ordinal::ranef(fit)$regione)
+parameters::random_parameters(fit)
+```
+
+The estimated Standard Deviation of the Intercept random effect is equal *0.40*. 
+
+The different intercepts are displayed with the ranef(fit)$regione command and they lie inside a range that goes from *-0.7155066 to 1.0669667*
+
+From the random parameter extraction we can see that the *within-group* variance for the model is 3.29 and the *between-group* variance is 0.16. 
+
+```{r}
+sjPlot::plot_model(fit, type = "re")
+```
+
+From the random effect plot we can see the different intercepts regarding each region with their confidence intervals. As shown from the plot the scale is very little, that is coherent with the results given by the ICC. 
+
+We'll focus on the most significant values for both directions detected in 5 regions: Abruzzo, Molise, Calabria, Trento, Valle d'Aosta.
+
+**Plotting predicted logit by keeping all the covariates fixed except the age.**
+```{r}
+model_coefs <-  coef(fit)$regione[,c("(Intercept)","s07_eta")]%>%dplyr::slice(2,3,13,14,18)%>%
+  rename(Intercept = `(Intercept)`, Slope = s07_eta)%>%
+  tibble::rownames_to_column("regione") 
+model_coefs
+health_groups_rani <- left_join(df%>%filter(regione== c("Valle d'Aosta/Vallée d'Aoste","Provincia Autonoma di Trento","Abruzzo","Molise","Calabria")), model_coefs, by = "regione")
+ggplot(data = health_groups_rani,
+       mapping = aes(x = s07_eta,
+                     y = predict(fit, newdata = health_groups_rani),
+                     colour = regione)
+       ) +
+  geom_point(na.rm = T, alpha = 0.5) +
+  geom_abline(aes(intercept = Intercept,
+                  slope = Slope,
+                  colour = as.factor(regione)
+                  ),
+              size = 1.5
+              ) +
+#  scale_x_continuous(breaks = seq(1:10) - 1) +
+  theme(legend.position = "top") + ylab("Predicted logit")
+```
+From the predicted logit plot we can detect the differences between random effects for regions.
+As stated in the model, the effect of the age over the log-odds of having mental health issues is linear and *equal* for all the regions.
+
+Here as in the previous plot we can detect positive and negative effects to be in a specific region over mental health disorders. Molise has the highest intercept in the dataset while Calabria has the lowest, this means that living in Molise rather than in Calabria increases the odds of having mental disorders.
+
+# Conclusion
+
+- Regarding our dependent variable mental health, alcohol use and smoker status, the homogeneous model showed a better fit than the one that supposed independence between them. People with medium level of consumption (1 to 15 times in 30 days) are the most likely to suffer mental health issues;
+
+- As discovered through the logistic regression, there is a significant association between economic situation, physical health and mental health: the presence of physical health issue combined with bad economic situation increases the likelihood of having psychological disturbances;
+
+- We were expecting an higher variability between regions for the mental health problem but from the results given by the random intercepts model we really can't validate our assumption (only 5% of the variance in the model is explained by the random effect).
+
+

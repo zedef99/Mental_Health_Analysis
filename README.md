@@ -1,4 +1,4 @@
-# Mental_Health_Analysis
+# Mental Health Analysis
 
 This is a project for a university course.
 

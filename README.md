@@ -2,8 +2,8 @@
 
 This is a project for a university course.
 
-We have a dataset with the answers of the 2019 PASSI Questionnaire and we are asked to do an analysis of a variable of our interest. <br>
-Me and my group decide to focus on the mental health variable. Particularly we tried to discover the correlation between mental health and the smoker status and/or alcohol consumption variables.
+We had a dataset with the answers of the 2019 PASSI Questionnaire and we were asked to do an analysis of a variable of our interest. <br>
+Me and my group decided to focus on the mental health variable. Particularly we tried to discover the correlation between mental health and the smoker status and/or alcohol consumption variables.
 In the pdf you can find a brief summary on how we developed the project and a commentary on each step.
 
 Our conclusion were: 
